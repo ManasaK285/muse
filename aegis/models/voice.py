@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -36,8 +37,12 @@ class VoiceTranscriber:
 
     def transcribe(self, audio: bytes, filename="command.wav"):
         mime = MIME.get(Path(filename).suffix.lower(), "application/octet-stream")
-        data = self.client.post(settings.voice_endpoint, files={"file": (filename, audio, mime)},
-                                data={"model": settings.voice_model})
+        # the endpoint wants two multipart parts: "request" (JSON settings) and "audio" (the clip)
+        request = json.dumps({"model": settings.voice_model})
+        data = self.client.post(settings.voice_endpoint, files={
+            "request": ("request.json", request.encode(), "application/json"),
+            "audio": (filename, audio, mime),
+        })
         text = _transcript(data)
         if not text:
             raise RuntimeError(f"no transcript in response keys {list(data)[:8] if isinstance(data, dict) else data!r}")
