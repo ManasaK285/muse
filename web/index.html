@@ -450,6 +450,8 @@ function ModelStack({ stack }) {
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
       <span className="font-mono text-[10px] text-txt-lo mr-1">META MODELS</span>
+      {stack.some(m => m.model === "Muse Spark Open" && m.state === "live") &&
+        <span className="font-mono text-[10px] text-accent ml-1">Built with Muse Spark Open</span>}
       {stack.map(m => (
         <span key={m.model} title={`${m.role}: ${m.state}`}><Badge tone={tone(m.state)}>{m.model.replace("Muse ", "")} · {short(m.state)}</Badge></span>
       ))}
@@ -626,7 +628,7 @@ function App() {
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-2 flex-1 min-w-[420px] max-w-[62%]">
           <span className="font-mono text-[10px] text-txt-lo">INSTRUCTION</span>
-          <button onClick={mic.toggle} disabled={s.running || mic.state === "transcribing"} title="speak the instruction (Muse Voice Transcribe)"
+          <button onClick={mic.toggle} disabled={(s.running && mic.state !== "recording") || mic.state === "transcribing"} title="speak the instruction (Muse Voice Transcribe)"
             className={`px-2 py-1 rounded border font-mono text-[11px] ${mic.state === "recording" ? "border-bad text-bad bg-bad/10" : "border-ink-500 text-txt-mid hover:text-txt-hi"}`}>
             {mic.state === "recording" ? <span className="live">● stop</span> : mic.state === "transcribing" ? "transcribing" : "🎙 speak"}
           </button>
