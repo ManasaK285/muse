@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aegis-VLA Mission Control</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/vendor/tailwind.css" />
+<script src="/vendor/react.production.min.js"></script>
+<script src="/vendor/react-dom.production.min.js"></script>
+<script src="/vendor/babel.min.js"></script>
+<style>
+  body { background: #07090c; }
+  .scan { background-image: linear-gradient(rgba(108,182,255,.035) 1px, transparent 1px); background-size: 100% 3px; }
+  .panel { background: #0d1116; border: 1px solid #1b222c; border-radius: 10px; overflow: hidden; }
+  .thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .thin::-webkit-scrollbar-thumb { background: #273140; border-radius: 3px; }
+  .pix { image-rendering: auto; }
+  @keyframes pulse2 { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .live { animation: pulse2 1.1s ease-in-out infinite; }
+</style>
+</head>
+<body class="h-full font-sans text-txt-hi">
+<div id="root" class="h-full"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useReducer, useRef, useMemo } = React;
+
+const NODES = [
+  { key: "perception", label: "Perception", sub: "SAM 3.1 scene graph" },
+  { key: "synthesis", label: "Synthesis", sub: "Spark · Code · Wonder · Image" },
+  { key: "sandbox", label: "Sandbox", sub: "AST gate + 3x rollout" },
+  { key: "auditor", label: "Auditor", sub: "counterfactual diff" },
+  { key: "repair", label: "Repair", sub: "Muse Code patch" },
+  { key: "redteam", label: "Red Team", sub: "Spark Open attacks" },
+];
+
+const SCENARIOS = [
+  { key: "collision", label: "Silent Collision", hint: "kinematic trap" },
+  { key: "slip", label: "Grasp Slippage", hint: "domain randomization" },
+  { key: "reward_hack", label: "Reward Hacking", hint: "state teleportation" },
+];
+
+const empty = () => ({
+  running: false, mission: null, activeNode: null, doneNodes: {}, perception: null, plan: null,
+  wonder: null, codes: [], gates: {}, rollouts: {}, naive: null, probe: null, audits: {},
+  diagnoses: {}, verdict: null, log: [], error: null, harness: null, forecasts: {}, scores: {}, redteam: null,
+});
+
+function stamp() { return new Date().toLocaleTimeString([], { hour12: false }); }
+
+function reducer(s, a) {
+  if (a.type === "reset") return { ...empty(), running: true };
+  const d = a.data;
+  const log = (lvl, msg) => [...s.log, { t: stamp(), lvl, msg }].slice(-300);
+  switch (a.type) {
+    case "mission_start":
+      return { ...s, mission: d, log: log("info", `mission ${d.title}, chaos injection ${d.chaos ? "ON" : "OFF"}`) };
+    case "node":
+      if (d.status === "start") return { ...s, activeNode: d.node, log: log("node", `${d.node} started (iter ${d.iteration})`) };
+      return { ...s, doneNodes: { ...s.doneNodes, [d.node]: true } };
+    case "perception": {
+      const n = Object.keys(d.scene_graph.objects).length;
+      const rel = d.scene_graph.relations.map(r => `${r.subject} ${r.type}`).join(", ");
+      return { ...s, perception: d, log: log("info", `${d.segmenter}: ${n} objects deprojected${rel ? ", " + rel : ""}`) };
+    }
+    case "plan":
+      return { ...s, plan: d, log: log("info", `${d.planner}: ${d.plan.subgoals.map(x => x.name).join(" > ")}`) };
+    case "wonder": {
+      const objs = d.prediction.objects;
+      const fixed = Object.values(objs).filter(o => o.must_not_move).length;
+      const lines = [log("info", `${d.world_model}: predicted success state, ${fixed} objects must not move`)];
+      let st = { ...s, wonder: d, log: lines[0] };
+      st.log = [...st.log, { t: stamp(), lvl: "info", msg: `goal frame rendered by ${d.source}` }];
+      if (d.error) st.log = [...st.log, { t: stamp(), lvl: "warn", msg: `fallback: ${d.error}` }];
+      return st;
+    }
+    case "forecast":
+      return { ...s, forecasts: { ...s.forecasts, [d.iteration]: d.forecast },
+               log: log("node", `Wonder forecast v${d.iteration}: ${d.forecast.predicted_outcome} (${d.forecast.confidence}) ${d.forecast.reasoning || ""}`) };
+    case "forecast_score":
+      return { ...s, scores: { ...s.scores, [d.iteration]: d },
+               log: log(d.hit ? "ok" : "warn", `forecast v${d.iteration}: predicted ${d.predicted}, physics ${d.actual}, ${d.hit ? "HIT" : "MISS"}`) };
+    case "code":
+      return { ...s, codes: [...s.codes.filter(c => c.iteration !== d.iteration), d],
+               log: log("info", `policy v${d.iteration} written by ${d.source}`) };
+    case "gate":
+      return { ...s, gates: { ...s.gates, [d.iteration]: d },
+               log: log(d.passed ? "ok" : "bad", d.passed ? `AST integrity gate PASS (v${d.iteration})`
+                 : `AST gate BLOCKED: ${d.violations.map(v => `L${v.line} ${v.rule}`).join(", ")}`) };
+    case "rollout": {
+      const it = { ...(s.rollouts[d.iteration] || {}), [d.seed]: d };
+      const t = d.telemetry || {};
+      return { ...s, rollouts: { ...s.rollouts, [d.iteration]: it },
+               log: log(d.verified ? "info" : "bad", d.verified
+                 ? `seed ${d.seed}: ${d.status}, exit ${d.exit_code}, ${d.verify_msg}, contact ${fmtForce(t.max_contact_force_n)}`
+                 : `seed ${d.seed}: ${d.status}, exit ${d.exit_code}, ${d.verify_msg}`) };
+    }
+    case "naive":
+      return { ...s, naive: d, log: log("warn", `naive harness: ${d.naive_verdict}`) };
+    case "redteam_probe":
+      return { ...s, probe: d, log: log("bad", `red team probe, static gate off: ${(d.violation || {}).message || d.status}`) };
+    case "audit": {
+      let st = { ...s, audits: { ...s.audits, [d.iteration]: d },
+                 log: log(d.passed ? "ok" : "bad", `counterfactual audit v${d.iteration}: survival ${d.survival}`) };
+      (d.advisories || []).slice(0, 3).forEach(a => { st.log = [...st.log, { t: stamp(), lvl: "warn", msg: a }]; });
+      if (d.sam_stats) st.log = [...st.log, { t: stamp(), lvl: d.sam_stats.hit_rate >= 0.8 ? "ok" : "warn",
+        msg: `SAM 3.1 so far: ${d.sam_stats.objects_found} found / ${d.sam_stats.objects_missed} missed (${Math.round(d.sam_stats.hit_rate * 100)}%)` +
+             (Object.keys(d.sam_stats.missed_by_object).length ? `, renderer filled ${JSON.stringify(d.sam_stats.missed_by_object)}` : "") }];
+      return st;
+    }
+    case "diagnosis":
+      return { ...s, diagnoses: { ...s.diagnoses, [d.iteration]: d.diagnosis }, diagBy: d.planner,
+               log: log("warn", `${d.diagnosis.failure_mode}: ${d.diagnosis.root_cause}`) };
+    case "verdict":
+      return { ...s, verdict: d, running: false, activeNode: null,
+               log: log(d.verdict === "VERIFIED" ? "ok" : "bad", d.verdict === "HARNESS_ERROR"
+                 ? `VERDICT HARNESS_ERROR, the sandbox never ran a policy (${d.elapsed_s}s)`
+                 : `VERDICT ${d.verdict} after ${d.recovery_cycles} recovery cycle(s), ${d.elapsed_s}s`) };
+    case "redteam":
+      return { ...s, redteam: d, log: log(d.blocked === d.total ? "ok" : "bad",
+               `red team (${d.source}): ${d.blocked}/${d.total} attacks blocked`) };
+    case "sandbox_error":
+      return { ...s, harness: d, log: log("bad", `HARNESS ERROR: ${d.cause}`) };
+    case "error":
+      return { ...s, error: d.message, running: false, log: log("bad", d.message) };
+    default:
+      return s;
+  }
+}
+
+function fmtForce(m) {
+  if (!m) return "n/a";
+  const v = Math.max(0, ...Object.values(m));
+  return `${v.toFixed(1)} N`;
+}
+
+function Badge({ tone, children }) {
+  const map = {
+    ok: "bg-ok/10 text-ok border-ok/40", bad: "bg-bad/10 text-bad border-bad/40",
+    warn: "bg-warn/10 text-warn border-warn/40", idle: "bg-ink-600 text-txt-mid border-ink-500",
+    accent: "bg-accent/10 text-accent border-accent/40",
+  };
+  const icon = { ok: "✓", bad: "✕", warn: "!", idle: "", accent: "" }[tone];
+  return <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-mono font-medium whitespace-nowrap ${map[tone]}`}>{icon && <b>{icon}</b>}{children}</span>;
+}
+
+function PanelHead({ n, title, model, right }) {
+  return (
+    <div className="flex items-center justify-between px-3 py-2 border-b border-ink-600">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="font-mono text-[10px] text-txt-lo">{n}</span>
+        <span className="text-[13px] font-semibold tracking-wide truncate">{title}</span>
+        {model && <span className="font-mono text-[10px] text-accent/80 truncate">{model}</span>}
+      </div>
+      <div className="flex items-center gap-2 shrink-0">{right}</div>
+    </div>
+  );
+}
+
+function Player({ frames, label }) {
+  const [i, setI] = useState(0);
+  const [play, setPlay] = useState(true);
+  useEffect(() => { setI(0); setPlay(true); }, [frames]);
+  useEffect(() => {
+    if (!play || !frames || frames.length < 2) return;
+    const h = setInterval(() => setI(x => (x + 1) % frames.length), 66);
+    return () => clearInterval(h);
+  }, [play, frames]);
+  if (!frames || !frames.length) return <Placeholder text="no rollout video yet" />;
+  return (
+    <div className="flex flex-col h-full">
+      <div className="relative flex-1 min-h-0 bg-black rounded overflow-hidden">
+        <img src={`data:image/jpeg;base64,${frames[i]}`} className="w-full h-full object-contain pix" />
+        <span className="absolute top-1 left-1 font-mono text-[10px] bg-black/60 px-1.5 rounded">{label}</span>
+      </div>
+      <div className="flex items-center gap-2 mt-1">
+        <button onClick={() => setPlay(!play)} className="font-mono text-[11px] text-txt-mid hover:text-txt-hi w-10">{play ? "pause" : "play"}</button>
+        <input type="range" min={0} max={frames.length - 1} value={i}
+               onChange={e => { setPlay(false); setI(+e.target.value); }} className="flex-1 accent-sky-400" />
+        <span className="font-mono text-[10px] text-txt-lo w-16 text-right">{(i * 16 / 240).toFixed(2)}s</span>
+      </div>
+    </div>
+  );
+}
+
+function Img({ b64, label, tone }) {
+  if (!b64) return <Placeholder text={`${label}: waiting`} />;
+  return (
+    <div className="relative h-full bg-black rounded overflow-hidden">
+      <img src={`data:image/jpeg;base64,${b64}`} className="w-full h-full object-contain" />
+      <span className={`absolute top-1 left-1 font-mono text-[10px] px-1.5 rounded bg-black/60 ${tone || ""}`}>{label}</span>
+    </div>
+  );
+}
+
+function Placeholder({ text }) {
+  return <div className="h-full w-full rounded border border-dashed border-ink-500 flex items-center justify-center font-mono text-[11px] text-txt-lo scan">{text}</div>;
+}
+
+function Pipeline({ active, done, running }) {
+  return (
+    <div className="flex items-center gap-1">
+      {NODES.map((n, idx) => {
+        const on = active === n.key;
+        const fin = done[n.key];
+        return (
+          <React.Fragment key={n.key}>
+            <div className={`px-2.5 py-1 rounded-md border ${on ? "border-accent bg-accent/10" : fin ? "border-ink-500 bg-ink-700" : "border-ink-600"}`}>
+              <div className={`text-[11px] font-semibold ${on ? "text-accent" : fin ? "text-txt-hi" : "text-txt-lo"}`}>
+                {on && running && <span className="live mr-1">●</span>}{n.label}
+              </div>
+              <div className="font-mono text-[9px] text-txt-lo">{n.sub}</div>
+            </div>
+            {idx < NODES.length - 1 && <span className="text-txt-lo text-xs">›</span>}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function sourcesFrom(s) {
+  const out = [];
+  if (s.naive) out.push({ id: "naive", label: "Naive harness", frames: s.naive.frames, kind: "naive", ev: s.naive });
+  if (s.probe) out.push({ id: "probe", label: "Red team probe", frames: s.probe.frames, kind: "probe", ev: s.probe });
+  Object.keys(s.rollouts).map(Number).sort().forEach(it => {
+    [0, 1, 2].forEach(seed => {
+      const r = s.rollouts[it][seed];
+      if (r) out.push({ id: `${it}-${seed}`, label: `v${it} seed ${seed}`, frames: r.frames, kind: "rollout", it, seed, ev: r });
+    });
+  });
+  return out;
+}
+
+function Q1({ s, sel, setSel, sources }) {
+  const cur = sources.find(x => x.id === sel) || sources[sources.length - 1];
+  const seg = (s.mission && s.mission.short && s.mission.short.perception) || "SAM 3.1";
+  let overlay = s.perception && s.perception.overlay, olabel = `${seg} pre-rollout masks`;
+  if (cur && cur.kind === "rollout") {
+    const a = s.audits[cur.it];
+    const ps = a && a.per_seed.find(p => p.seed === cur.seed);
+    if (ps && ps.images && ps.images.overlay) { overlay = ps.images.overlay; olabel = `${seg} post-rollout + EE spline`; }
+  }
+  const verdictTone = cur && cur.kind === "naive" ? "warn" : null;
+  return (
+    <div className="panel flex flex-col min-h-0">
+      <PanelHead n="01" title="Physical Execution" model={`PyBullet · ${s.mission ? s.mission.backends.perception : "SAM 3.1"}`}
+        right={cur && cur.kind === "naive" ? <Badge tone="warn">naive says {s.naive.naive_verdict}</Badge>
+              : cur && cur.ev ? <Badge tone={cur.ev.status === "ok" ? "accent" : "bad"}>{cur.ev.status}</Badge> : null} />
+      <div className="flex gap-1 px-3 pt-2 flex-wrap">
+        {sources.map(x => (
+          <button key={x.id} onClick={() => setSel(x.id)}
+            className={`font-mono text-[10px] px-2 py-0.5 rounded border ${cur && cur.id === x.id ? "border-accent text-accent bg-accent/10" : "border-ink-500 text-txt-mid hover:text-txt-hi"}`}>{x.label}</button>
+        ))}
+        {!sources.length && <span className="font-mono text-[10px] text-txt-lo">rollouts will appear here</span>}
+      </div>
+      <div className="grid grid-cols-2 grid-rows-[minmax(0,1fr)] gap-2 p-3 flex-1 min-h-0">
+        <Player frames={cur && cur.frames} label={cur ? cur.label : ""} />
+        <Img b64={overlay} label={olabel} />
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, tone, sub }) {
+  const c = { ok: "text-ok", bad: "text-bad", warn: "text-warn" }[tone] || "text-txt-hi";
+  return (
+    <div className="bg-ink-700 rounded-md px-2.5 py-2 border border-ink-600 min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-txt-lo truncate">{label}</div>
+      <div className={`font-mono text-[15px] font-semibold ${c}`}>{value}</div>
+      {sub && <div className="font-mono text-[10px] text-txt-lo truncate">{sub}</div>}
+    </div>
+  );
+}
+
+function Q2({ s, cur }) {
+  let it, seed;
+  if (cur && cur.kind === "rollout") { it = cur.it; seed = cur.seed; }
+  else {
+    const its = Object.keys(s.audits).map(Number);
+    it = its.length ? Math.max(...its) : null; seed = 0;
+  }
+  const a = it != null ? s.audits[it] : null;
+  const ps = a && a.per_seed.find(p => p.seed === seed);
+  const m = (ps && ps.metrics) || {};
+  const obs = m.obstacle_visual || {};
+  const shift = Object.values(obs)[0];
+  const carry = m.carry_checks || [];
+  const held = carry.length ? `${carry.filter(c => c.held).length}/${carry.length}` : "n/a";
+  return (
+    <div className="panel flex flex-col min-h-0">
+      <PanelHead n="02" title="Counterfactual Diff" model={s.wonder ? `${s.wonder.world_model} · ${s.wonder.source}` : "Muse Wonder · Muse Image"}
+        right={ps ? <Badge tone={ps.passed ? "ok" : "bad"}>{ps.passed ? "matches" : "diverges"} · v{it} seed {seed}</Badge> : null} />
+      <div className="grid grid-cols-3 grid-rows-[minmax(0,1fr)] gap-2 p-3 flex-1 min-h-0">
+        <Img b64={s.wonder && s.wonder.expected} label={`expected goal (${s.mission && s.mission.short ? s.mission.short.goal_frame : "Muse Image"})`} />
+        <Img b64={ps && ps.images && ps.images.final} label="actual post-rollout" />
+        <Img b64={ps && ps.images && ps.images.heatmap} label="IoU divergence heatmap" />
+      </div>
+      <Forecast s={s} it={it} />
+      <div className="grid grid-cols-4 gap-2 px-3 pb-3">
+        <Metric label="payload mask IoU" value={m.payload_mask_iou != null ? m.payload_mask_iou.toFixed(2) : "n/a"}
+                tone={m.payload_mask_iou == null ? null : m.iou_is_advisory ? "warn" : m.payload_mask_iou >= 0.3 ? "ok" : "bad"}
+                sub={m.iou_is_advisory ? "advisory, generated frame" : "vs expected frame"} />
+        <Metric label="vs world model goal" value={m.visual_goal_error_m != null ? `${(m.visual_goal_error_m * 100).toFixed(1)} cm` : "n/a"}
+                tone={m.visual_goal_error_m == null ? null : m.visual_goal_error_m <= (m.goal_tolerance_m || 0.04) ? "ok" : "bad"}
+                sub={`tolerance ${((m.goal_tolerance_m || 0.04) * 100).toFixed(0)} cm`} />
+        <Metric label="obstacle mask shift" value={shift && shift.shift_m != null ? `${(shift.shift_m * 1000).toFixed(0)} mm` : "n/a"}
+                tone={!shift ? null : shift.shift_m <= 0.01 && shift.mask_iou >= 0.6 ? "ok" : "bad"} sub={shift ? `mask IoU ${shift.mask_iou}` : ""} />
+        <Metric label="payload in gripper" value={held} tone={!carry.length ? null : carry.every(c => c.held) ? "ok" : "bad"} sub="carry frames" />
+      </div>
+    </div>
+  );
+}
+
+function Forecast({ s, it }) {
+  const fc = it != null ? s.forecasts[it] : null;
+  const sc = it != null ? s.scores[it] : null;
+  if (!fc) return null;
+  return (
+    <div className="mx-3 mb-2 rounded-md border border-accent/30 bg-accent/5 px-3 py-1.5 flex items-center gap-2 min-w-0">
+      <span className="font-mono text-[10px] text-txt-lo shrink-0">WONDER FORECAST v{it}</span>
+      <Badge tone="accent">{fc.predicted_outcome} {fc.confidence != null ? Number(fc.confidence).toFixed(2) : ""}</Badge>
+      {sc && <Badge tone={sc.hit ? "ok" : "warn"}>{sc.hit ? "HIT" : "MISS"} vs physics {sc.actual}</Badge>}
+      <span className="text-[11px] text-txt-mid truncate">{fc.reasoning}</span>
+    </div>
+  );
+}
+
+function diffLines(c) {
+  if (!c.diff) return c.code.split("\n").map(t => ({ t, k: " " }));
+  const out = [];
+  c.diff.split("\n").forEach(l => {
+    if (l.startsWith("+++") || l.startsWith("---")) return;
+    if (l.startsWith("@@")) { out.push({ t: l, k: "@" }); return; }
+    out.push({ t: l.slice(1), k: l[0] || " " });
+  });
+  return out;
+}
+
+function Q3({ s }) {
+  const [tab, setTab] = useState(null);
+  const codes = [...s.codes].sort((a, b) => a.iteration - b.iteration);
+  const latest = codes.length ? codes[codes.length - 1].iteration : null;
+  useEffect(() => { setTab(latest); }, [latest]);
+  const c = codes.find(x => x.iteration === tab) || codes[codes.length - 1];
+  const g = c && s.gates[c.iteration];
+  const a = c && s.audits[c.iteration];
+  const status = !c ? null : g && !g.passed ? ["bad", "BLOCKED"] : a ? (a.passed ? ["ok", "VERIFIED"] : ["bad", "FAILED"])
+    : s.harness ? ["bad", "NOT EVALUATED"] : ["idle", "running"];
+  return (
+    <div className="panel flex flex-col min-h-0">
+      <PanelHead n="03" title="Policy Source & Patch Diff" model={c ? c.source : "Muse Code"}
+        right={status && <Badge tone={status[0]}>{status[1]}</Badge>} />
+      <div className="flex gap-1 px-3 pt-2 items-center">
+        {codes.map(x => (
+          <button key={x.iteration} onClick={() => setTab(x.iteration)}
+            className={`font-mono text-[10px] px-2 py-0.5 rounded border ${c && c.iteration === x.iteration ? "border-accent text-accent bg-accent/10" : "border-ink-500 text-txt-mid"}`}>
+            policy_v{x.iteration}.py
+          </button>
+        ))}
+        {c && c.directives && <span className="font-mono text-[10px] text-warn ml-2 truncate">patch: {c.directives.map(d => d.type).join(", ")}</span>}
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto thin m-3 mt-2 rounded bg-ink-900 border border-ink-600">
+        {!c ? <Placeholder text="Muse Code output streams here" /> :
+          <pre className="font-mono text-[11.5px] leading-[1.55] py-2">
+            {diffLines(c).map((l, i) => {
+              const bad = g && !g.passed && g.violations.some(v => v.line === i + 1) && !c.diff;
+              const cls = l.k === "+" ? "bg-ok/10 text-ok" : l.k === "-" ? "bg-bad/10 text-bad line-through decoration-bad/40"
+                : l.k === "@" ? "text-accent/70" : bad ? "bg-bad/15 text-bad" : "text-txt-mid";
+              return <div key={i} className={`px-3 whitespace-pre ${cls}`}><span className="inline-block w-4 text-txt-lo select-none">{l.k === " " ? "" : l.k}</span>{l.t}</div>;
+            })}
+          </pre>}
+      </div>
+    </div>
+  );
+}
+
+function Q4({ s }) {
+  const its = Object.keys(s.rollouts).map(Number);
+  const lastIt = s.codes.length ? Math.max(...s.codes.map(c => c.iteration)) : null;
+  const rs = lastIt != null && s.rollouts[lastIt] ? Object.values(s.rollouts[lastIt]) : [];
+  const verifiedN = rs.filter(r => r.verified).length;
+  const gate = lastIt != null ? s.gates[lastIt] : null;
+  const anyBlock = Object.values(s.gates).some(g => !g.passed) || (s.probe && s.probe.status === "security_violation");
+  const maxContact = rs.length ? Math.max(0, ...rs.map(r => Math.max(0, ...Object.values((r.telemetry || {}).max_contact_force_n || { a: 0 })))) : null;
+  const audit = lastIt != null ? s.audits[lastIt] : null;
+  const diagKeys = Object.keys(s.diagnoses).map(Number);
+  const diag = diagKeys.length ? s.diagnoses[Math.max(...diagKeys)] : null;
+  const logRef = useRef(null);
+  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [s.log.length]);
+  const recov = s.verdict ? s.verdict.recovery_cycles : Math.max(0, (lastIt || 1) - 1);
+  return (
+    <div className="panel flex flex-col min-h-0">
+      <PanelHead n="04" title="Sandbox Telemetry & Audit Log" model={s.mission ? s.mission.backends.sandbox : "Modal Sandboxes"} />
+      <div className="grid grid-cols-5 gap-2 p-3">
+        <Metric label="sandbox nonce" value={rs.length ? `${verifiedN}/${rs.length}` : gate && !gate.passed ? "n/a" : "..."}
+                tone={rs.length ? (verifiedN === rs.length ? "ok" : "bad") : null} sub="HMAC verified" />
+        <Metric label="AST audit hook" value={gate ? (gate.passed ? "PASS" : "BLOCK") : "..."}
+                tone={gate ? (gate.passed ? "ok" : "bad") : null} sub={anyBlock ? "violation trapped" : "armed"} />
+        <Metric label="max contact" value={maxContact != null ? `${maxContact.toFixed(1)} N` : "..."}
+                tone={maxContact == null ? null : maxContact > 1 ? "bad" : "ok"} sub="obstacle impulse" />
+        <Metric label="DR survival" value={audit ? audit.survival : "..."} tone={audit ? (audit.passed ? "ok" : "bad") : null} sub="friction / mass seeds" />
+        <Metric label="recovery cycles" value={String(recov)} tone={s.verdict ? (s.verdict.verdict === "VERIFIED" ? "ok" : "bad") : null} sub={s.verdict ? s.verdict.verdict : "autonomous"} />
+      </div>
+      {diag && (
+        <div className="mx-3 mb-2 rounded-md border border-warn/30 bg-warn/5 px-3 py-2">
+          <div className="flex items-center gap-2"><Badge tone="warn">{diag.failure_mode}</Badge>
+            <span className="font-mono text-[10px] text-txt-lo">root cause by {s.diagBy || "planner"}</span></div>
+          <div className="text-[12px] text-txt-hi mt-1 leading-snug">{diag.root_cause}</div>
+        </div>
+      )}
+      {s.redteam && <RedTeam r={s.redteam} />}
+      <div ref={logRef} className="flex-1 min-h-0 overflow-auto thin mx-3 mb-3 rounded bg-ink-900 border border-ink-600 p-2 font-mono text-[11px] leading-relaxed">
+        {s.log.map((l, i) => {
+          const c = { ok: "text-ok", bad: "text-bad", warn: "text-warn", node: "text-accent" }[l.lvl] || "text-txt-mid";
+          return <div key={i}><span className="text-txt-lo">{l.t}</span> <span className={c}>{l.msg}</span></div>;
+        })}
+        {!s.log.length && <span className="text-txt-lo">pick a scenario and press RUN</span>}
+      </div>
+    </div>
+  );
+}
+
+function RedTeam({ r }) {
+  const clean = r.blocked === r.total;
+  return (
+    <div className={`mx-3 mb-2 rounded-md border px-3 py-2 ${clean ? "border-ok/30 bg-ok/5" : "border-bad/50 bg-bad/10"}`}>
+      <div className="flex items-center gap-2">
+        <Badge tone={clean ? "ok" : "bad"}>RED TEAM {r.blocked}/{r.total} BLOCKED</Badge>
+        <span className="font-mono text-[10px] text-txt-lo truncate">attacks by {r.source}</span>
+      </div>
+      <div className="mt-1 space-y-0.5">
+        {r.attacks.map((a, i) => (
+          <div key={i} className="flex items-center gap-2 min-w-0" title={a.strategy}>
+            <span className="font-mono text-[11px] text-txt-hi w-48 truncate">{a.name}</span>
+            {a.caught_by.length ? a.caught_by.map(c => <Badge key={c} tone="ok">{c}</Badge>) : <Badge tone="bad">BREACH</Badge>}
+            <span className="text-[10.5px] text-txt-lo truncate">{a.strategy}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ModelStack({ stack }) {
+  if (!stack) return null;
+  const tone = st => st === "live" ? "ok" : st === "not configured" || st === "needs key" ? "idle" : "warn";
+  const short = st => ({ "offline twin": "offline", "via Muse Spark API": "via Spark", "not configured": "not set" })[st] || st;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className="font-mono text-[10px] text-txt-lo mr-1">META MODELS</span>
+      {stack.map(m => (
+        <span key={m.model} title={`${m.role}: ${m.state}`}><Badge tone={tone(m.state)}>{m.model.replace("Muse ", "")} · {short(m.state)}</Badge></span>
+      ))}
+    </div>
+  );
+}
+
+function encodeWav(chunks, inRate, outRate = 16000) {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const merged = new Float32Array(total);
+  let o = 0;
+  chunks.forEach(c => { merged.set(c, o); o += c.length; });
+  const ratio = inRate / outRate;
+  const n = Math.floor(merged.length / ratio);
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const str = (off, t) => [...t].forEach((ch, i) => v.setUint8(off + i, ch.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, outRate, true); v.setUint32(28, outRate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const x = Math.max(-1, Math.min(1, merged[Math.floor(i * ratio)]));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+function useMic(onText, onError) {
+  const rec = useRef(null);
+  const [state, setState] = useState("idle");
+  const start = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(stream);
+      const proc = ctx.createScriptProcessor(4096, 1, 1);
+      const chunks = [];
+      proc.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      src.connect(proc); proc.connect(ctx.destination);
+      rec.current = { stream, ctx, src, proc, chunks };
+      setState("recording");
+    } catch (e) { onError(`microphone: ${e.message}`); }
+  };
+  const stop = async () => {
+    const r = rec.current; if (!r) return;
+    r.proc.disconnect(); r.src.disconnect(); r.stream.getTracks().forEach(t => t.stop());
+    const wav = encodeWav(r.chunks, r.ctx.sampleRate); r.ctx.close(); rec.current = null;
+    setState("transcribing");
+    try {
+      const res = await fetch("/api/transcribe", { method: "POST", body: wav, headers: { "x-filename": "command.wav" } });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || res.statusText);
+      onText(j.text, j.backend);
+    } catch (e) { onError(`voice: ${e.message}`); }
+    setState("idle");
+  };
+  return { state, toggle: () => (state === "recording" ? stop() : state === "idle" ? start() : null) };
+}
+
+function HarnessBanner({ h }) {
+  if (!h) return null;
+  return (
+    <div className="rounded-md border border-bad/50 bg-bad/10 px-3 py-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Badge tone="bad">HARNESS ERROR</Badge>
+        <span className="text-[12px] text-txt-hi">{h.message}. Policies were not evaluated, so no repair was attempted.</span>
+        <span className="font-mono text-[10px] text-txt-lo">{h.platform} · {h.backend} · exit {String(h.exit_codes)}</span>
+      </div>
+      <div className="font-mono text-[11px] text-bad mt-1 break-all">{h.cause}</div>
+      {h.stderr_tail && <pre className="font-mono text-[10.5px] text-txt-mid mt-1 max-h-32 overflow-auto thin whitespace-pre-wrap">{h.stderr_tail}</pre>}
+      <div className="font-mono text-[10px] text-txt-lo mt-1">{h.hint}</div>
+    </div>
+  );
+}
+
+function Verdicts({ s }) {
+  const its = Object.keys(s.audits).map(Number).sort((a, b) => a - b);
+  return (
+    <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-ink-800 border border-ink-600">
+        <span className="text-[10px] uppercase tracking-wider text-txt-lo">naive agent</span>
+        {s.naive ? <Badge tone="warn">{s.naive.naive_verdict}</Badge> : <Badge tone="idle">idle</Badge>}
+      </div>
+      <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-ink-800 border border-ink-600">
+        <span className="text-[10px] uppercase tracking-wider text-txt-lo">aegis-vla</span>
+        {its.map(it => <Badge key={it} tone={s.audits[it].passed ? "ok" : "bad"}>v{it} {s.audits[it].passed ? "VERIFIED" : "REJECTED"} {s.audits[it].survival}</Badge>)}
+        {s.harness && <Badge tone="bad">HARNESS ERROR</Badge>}
+        {!its.length && !s.harness && <Badge tone="idle">{s.running ? "working" : "idle"}</Badge>}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [s, dispatch] = useReducer(reducer, null, empty);
+  const [scenario, setScenario] = useState("collision");
+  const [chaos, setChaos] = useState(true);
+  const [redteam, setRedteam] = useState(true);
+  const [instr, setInstr] = useState("");
+  const [voiceNote, setVoiceNote] = useState(null);
+  const [stack, setStack] = useState(null);
+  useEffect(() => { fetch("/api/health").then(r => r.json()).then(j => setStack(j.stack)).catch(() => {}); }, []);
+  const mic = useMic((text, backend) => { setInstr(text); setVoiceNote({ ok: true, msg: `heard via ${backend}` }); },
+                     msg => setVoiceNote({ ok: false, msg }));
+  const [sel, setSel] = useState(null);
+  const [conn, setConn] = useState("connecting");
+  const ws = useRef(null);
+
+  useEffect(() => {
+    let alive = true;
+    function connect() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const sock = new WebSocket(`${proto}://${location.host}/ws`);
+      sock.onopen = () => setConn("online");
+      sock.onclose = () => { setConn("offline"); if (alive) setTimeout(connect, 1500); };
+      sock.onmessage = e => { const m = JSON.parse(e.data); dispatch({ type: m.type, data: m.data }); };
+      ws.current = sock;
+    }
+    connect();
+    return () => { alive = false; ws.current && ws.current.close(); };
+  }, []);
+
+  const sources = useMemo(() => sourcesFrom(s), [s.naive, s.probe, s.rollouts]);
+  useEffect(() => {
+    // follow the newest rollout unless the user picked one
+    if (sources.length) setSel(sources[sources.length - 1].id);
+  }, [sources.length]);
+  const cur = sources.find(x => x.id === sel);
+
+  const run = () => {
+    if (!ws.current || ws.current.readyState !== 1 || s.running) return;
+    dispatch({ type: "reset" });
+    setSel(null);
+    ws.current.send(JSON.stringify({ action: "run", scenario, chaos, redteam, instruction: instr }));
+  };
+
+  return (
+    <div className="h-full flex flex-col p-3 gap-3 min-h-[760px]">
+      <header className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-md border border-accent/50 flex items-center justify-center font-mono text-accent font-bold">Æ</div>
+          <div>
+            <div className="font-semibold tracking-wide">AEGIS-VLA <span className="text-txt-lo font-normal">mission control</span></div>
+            <div className="font-mono text-[10px] text-txt-lo">adversarial verification + counterfactual world model harness</div>
+          </div>
+        </div>
+        <Pipeline active={s.activeNode} done={s.doneNodes} running={s.running} />
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-md border border-ink-500 overflow-hidden">
+            {SCENARIOS.map(x => (
+              <button key={x.key} onClick={() => setScenario(x.key)} disabled={s.running}
+                className={`px-3 py-1.5 text-left ${scenario === x.key ? "bg-ink-600" : "bg-ink-800 hover:bg-ink-700"}`}>
+                <div className={`text-[12px] font-semibold ${scenario === x.key ? "text-txt-hi" : "text-txt-mid"}`}>{x.label}</div>
+                <div className="font-mono text-[9px] text-txt-lo">{x.hint}</div>
+              </button>
+            ))}
+          </div>
+          <button onClick={() => setChaos(!chaos)} disabled={s.running}
+            className={`px-3 py-1.5 rounded-md border text-[11px] font-mono ${chaos ? "border-warn/60 text-warn bg-warn/10" : "border-ink-500 text-txt-mid"}`}>
+            chaos injection {chaos ? "ON" : "OFF"}
+          </button>
+          <button onClick={() => setRedteam(!redteam)} disabled={s.running}
+            className={`px-3 py-1.5 rounded-md border text-[11px] font-mono ${redteam ? "border-bad/60 text-bad bg-bad/10" : "border-ink-500 text-txt-mid"}`}>
+            red team {redteam ? "ON" : "OFF"}
+          </button>
+          <button onClick={run} disabled={s.running || conn !== "online"}
+            className="px-4 py-1.5 rounded-md bg-accent text-ink-900 font-semibold text-[13px] disabled:opacity-40">
+            {s.running ? "RUNNING" : "RUN"}
+          </button>
+        </div>
+      </header>
+
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-1 min-w-[420px] max-w-[62%]">
+          <span className="font-mono text-[10px] text-txt-lo">INSTRUCTION</span>
+          <button onClick={mic.toggle} disabled={s.running || mic.state === "transcribing"} title="speak the instruction (Muse Voice Transcribe)"
+            className={`px-2 py-1 rounded border font-mono text-[11px] ${mic.state === "recording" ? "border-bad text-bad bg-bad/10" : "border-ink-500 text-txt-mid hover:text-txt-hi"}`}>
+            {mic.state === "recording" ? <span className="live">● stop</span> : mic.state === "transcribing" ? "transcribing" : "🎙 speak"}
+          </button>
+          <input value={instr} onChange={e => setInstr(e.target.value)} disabled={s.running}
+            placeholder={(s.mission && s.mission.scenario === scenario && s.mission.instruction) || "scenario default instruction (type or speak to override)"}
+            className="flex-1 min-w-0 bg-ink-800 border border-ink-600 rounded px-2 py-1 text-[12px] text-txt-hi placeholder-txt-lo outline-none focus:border-accent/60" />
+          {voiceNote && <span className={`font-mono text-[10px] truncate max-w-[220px] ${voiceNote.ok ? "text-ok" : "text-bad"}`}>{voiceNote.msg}</span>}
+        </div>
+        <div className="flex items-center gap-3">
+          <Verdicts s={s} />
+          <span className={`font-mono text-[10px] ${conn === "online" ? "text-ok" : "text-bad"}`}>ws {conn}</span>
+        </div>
+      </div>
+
+      <ModelStack stack={(s.mission && s.mission.stack) || stack} />
+      <HarnessBanner h={s.harness} />
+
+      <main className="grid grid-cols-2 grid-rows-2 gap-3 flex-1 min-h-0">
+        <Q1 s={s} sel={sel} setSel={setSel} sources={sources} />
+        <Q2 s={s} cur={cur} />
+        <Q3 s={s} />
+        <Q4 s={s} />
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

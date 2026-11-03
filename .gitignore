@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+runs/*
+!runs/.gitkeep
+.pytest_cache/
+node_modules/
+.venv/
