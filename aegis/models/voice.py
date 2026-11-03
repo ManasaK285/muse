@@ -65,14 +65,17 @@ class VoiceTranscriber:
     def transcribe(self, audio: bytes, filename="command.wav"):
         mime = MIME.get(Path(filename).suffix.lower(), "application/octet-stream")
         rate, channels = _wav_info(audio)
-        request = {"model": settings.voice_model}
-        enc = iter(ENCODINGS)
-        request["audioEncoding"] = next(enc)
-        for _ in range(12):
+        extra = {}
+        # walk encoding names, each with and without "model" in the request part, adding any field Meta names
+        plans = [(e, m) for e in ENCODINGS for m in (True, False)]
+        i = 0
+        while i < len(plans) and len(self.attempts) < 24:
+            enc, with_model = plans[i]
+            request = ({"model": settings.voice_model} if with_model else {}) | {"audioEncoding": enc} | extra
             status, body = self._send(request, filename, audio, mime)
             err = body.get("error") if isinstance(body, dict) else None
-            self.attempts.append({"request": dict(request), "status": status,
-                                  "message": (err or {}).get("message") if isinstance(err, dict) else None})
+            msg = (err or {}).get("message") if isinstance(err, dict) else None
+            self.attempts.append({"request": dict(request), "status": status, "message": msg})
             if status < 400:
                 text = _transcript(body)
                 if not text:
@@ -82,22 +85,15 @@ class VoiceTranscriber:
             if status != 400 or not isinstance(err, dict):
                 raise MetaAPIError(f"{settings.voice_endpoint} -> {status}: {json.dumps(body)[:400]}")
             param = err.get("param") or ""
-            # the API names the field it objects to, so adjust exactly that field and retry
-            if param == "audioEncoding":
-                try:
-                    request["audioEncoding"] = next(enc)
-                    continue
-                except StopIteration:
-                    break
-            if param in RATE_KEYS:
-                request[param] = rate
+            if param in RATE_KEYS and param not in extra:
+                extra[param] = rate
                 continue
-            if param in CHANNEL_KEYS:
-                request[param] = channels
+            if param in CHANNEL_KEYS and param not in extra:
+                extra[param] = channels
                 continue
-            break
-        tried = "; ".join(f"{a['request']} -> {a['status']} {a['message']}" for a in self.attempts[-4:])
-        raise MetaAPIError(f"voice request not accepted. Last attempts: {tried}")
+            i += 1
+        tried = "; ".join(f"{a['request']} -> {a['status']} {a['message']}" for a in self.attempts)
+        raise MetaAPIError(f"voice request not accepted. Attempts: {tried}"[:1500])
 
 
 def transcribe(audio: bytes, filename="command.wav"):
