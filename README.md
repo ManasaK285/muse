@@ -317,13 +317,6 @@ web/index.html            4-quadrant dashboard (React + Tailwind, vendored, work
 tests/
 ```
 
-## Recording the 2-minute video
-
-1. `python -m aegis serve` and open the dashboard full screen at 1680x1000 or larger.
-2. For each scenario, press RUN and let it finish. Then click `Naive harness` in panel 01 and point at the yellow `SUCCESS (Exit 0)` badge, and click the last `v2 seed` tab to show the verified run.
-3. Collision: panel 02 heatmap and panel 03 diff (the `CLEARANCE_MARGIN_M` line plus the spline). Slip: the `payload in gripper` tile and Spark's 13.2 N reasoning. Reward hack: the red-team probe tab and the `SECURITY_VIOLATION` log line.
-4. Cut the dead air while rollouts run; each mission's GIFs are in `runs/` if you want cleaner inserts.
-
 ## Troubleshooting
 
 **Every seed shows `no_report, exit 1` and the verdict is `HARNESS_ERROR`.** The sandbox runner process crashed before the physics loop started, so no policy was evaluated. The loop stops right away instead of "repairing" a policy that never ran, and the dashboard shows a red banner with the runner's actual traceback. Run `python -m aegis doctor` to reproduce it with a single rollout. Version 0.1.0 had exactly this failure on Windows (`os.setsid` does not exist there); 0.1.1 fixes it, and a test (`tests/test_portability.py`) runs the real runner with the POSIX process-group API removed.
