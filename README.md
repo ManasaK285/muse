@@ -17,7 +17,7 @@ When either one fails, Muse Spark writes a root-cause diagnosis, Muse Code patch
 
 ![dashboard](docs/dashboard_collision.png)
 
-## Results (live run on Meta Model API, Nov 2 2026)
+## Results (live run on Meta Model API)
 
 All numbers below are copied from live terminal runs on Windows 11 / Python 3.14, with every Meta slot pointed at the real API. Nothing in this section comes from offline mode.
 
