@@ -284,8 +284,6 @@ audit_iter{n}_seed{k}_{overlay|heatmap|final}.jpg
 summary.json
 ```
 
-The GIFs make good B-roll for the submission video.
-
 ## Tests
 
 ```bash
@@ -327,5 +325,5 @@ tests/
 
 * In offline mode, SAM is replaced by renderer instance masks, Muse Wonder by a geometric prior (no forecasts), and Muse Image by a physics re-render. Everything downstream (deprojection, IoU, divergence, diagnosis) is the same code that runs on live model output.
 * SAM 3.1 and Muse Image follow Meta's published request shapes, and SAM decoding is tested with Meta's parser on the sample line from Meta's docs, but neither has been run against a live key from this repo; see "Going live". The Spark and Wonder chat path, including forecast scoring, is covered by a stubbed end-to-end test, and the response parsers are tested on several shapes.
-* The audit hook plus traps make a strong in-process boundary, but they are not a kernel sandbox. That is what the Modal backend is for.
+* The audit hook plus traps make a strong in-process boundary, but they are not a kernel sandbox.
 * Joint torque peaks are reported as telemetry, not used as a pass/fail gate.
