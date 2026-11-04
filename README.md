@@ -96,7 +96,7 @@ With Muse Spark Open configured, the same harness asks it for fresh attacks ever
 
 A live mission takes 88 to 125 s with the API coder, and 194 to 206 s when Muse Code runs as a full agent for the patch (about 2 minutes of that is Muse Code working). Offline it takes 15 to 35 s. Caching the phrase that worked for each object cut SAM 3.1 calls per collision mission from 122 to 56 with the same 100% hit rate.
 
-### What the first live run taught us
+### What the first live run taught:
 
 The first live run found real problems, each fixed and covered by a test:
 * SAM 3.1 did not reliably match "glass beaker" or "gray containment tray" on flat-shaded simulator renders. Plain visual phrases ("light blue cylinder", "flat gray square", "red object") fixed it.
